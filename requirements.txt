@@ -3,3 +3,9 @@ pillow
 pandas
 openpyxl
 korean-lunar-calendar
+anthropic
+python-docx
+reportlab
+google-api-python-client
+google-auth
+requests

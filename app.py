@@ -1,4 +1,5 @@
-# 사주/타로/연애 이미지 자동 생성기
+# 사주 통합 자동화 시스템 v2
+# - 이미지 생성 + Claude API 해석 + PDF 생성 + 발송
 import streamlit as st
 import pandas as pd
 from datetime import datetime
@@ -6,6 +7,17 @@ import zipfile
 import io
 import os
 from korean_lunar_calendar import KoreanLunarCalendar
+
+# 추가 모듈 (선택적 로드)
+try:
+    from claude_api import SajuInterpreter, load_prompts_from_dir, estimate_cost, create_all_chapter_docx
+    from pdf_generator import create_pdf, read_docx, setup_fonts as setup_pdf_fonts
+    from delivery import send_email, send_bulk_emails, get_default_email_template
+    from google_drive import upload_to_drive
+    MODULES_AVAILABLE = True
+except ImportError as e:
+    MODULES_AVAILABLE = False
+    IMPORT_ERROR = str(e)
 
 from saju_calculator import (
     calc_사주, calc_대운, calc_세운, calc_월운, calc_신살,
@@ -383,12 +395,12 @@ with st.sidebar:
     용신표_체크 = st.checkbox("용신표", value=전체선택)
     
     st.divider()
-    st.caption("v1.0 - 사주 이미지 생성기")
+    st.caption("v2.0 - 통합 자동화 시스템")
 
 # ============================================
 # 탭 구성
 # ============================================
-tab1, tab2, tab3 = st.tabs(["📝 개별 입력", "📊 엑셀 일괄 처리", "📅 일진표"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📝 개별 입력", "📊 엑셀 일괄", "📅 일진표", "📄 보고서 생성", "📧 발송 관리"])
 
 # ============================================
 # 탭1: 개별 입력
@@ -1016,4 +1028,403 @@ with tab3:
             for 파일명, 경로 in 생성된_일진.items():
                 st.subheader(f"📅 {파일명.replace('_', ' ')}")
                 st.image(경로, caption=파일명)
+
+# ============================================
+# 탭4: 보고서 생성 (Claude API + PDF)
+# ============================================
+with tab4:
+    st.subheader("📄 사주 보고서 자동 생성")
+    
+    if not MODULES_AVAILABLE:
+        st.error(f"⚠️ 추가 모듈 로드 실패: {IMPORT_ERROR}")
+        st.code("pip install anthropic python-docx reportlab google-api-python-client", language="bash")
+        st.stop()
+    
+    st.info("""
+    **자동 보고서 생성 흐름**
+    1. 고객 정보 입력 → 사주 계산
+    2. 이미지 17종 자동 생성
+    3. Claude API로 장별 해석 생성
+    4. PDF 자동 조립
+    5. 다운로드 (또는 드라이브 업로드)
+    """)
+    
+    # ============================================
+    # 설정 영역
+    # ============================================
+    with st.expander("⚙️ API 설정", expanded=True):
+        api_key = st.text_input(
+            "🔑 Anthropic API Key",
+            type="password",
+            placeholder="sk-ant-...",
+            help="console.anthropic.com에서 발급"
+        )
+        
+        model_col, _ = st.columns([1, 1])
+        with model_col:
+            selected_model = st.selectbox(
+                "🤖 모델",
+                options=["claude-sonnet-4-20250514", "claude-haiku-3-5-20241022"],
+                format_func=lambda x: "Sonnet 4 (추천)" if "sonnet" in x else "Haiku 3.5 (저렴)"
+            )
+    
+    st.divider()
+    
+    # ============================================
+    # 고객 정보
+    # ============================================
+    st.subheader("👤 고객 정보")
+    
+    r_col1, r_col2 = st.columns(2)
+    
+    with r_col1:
+        r_이름 = st.text_input("이름", placeholder="홍길동", key="report_name")
+        r_성별 = st.radio("성별", ["남성", "여성"], horizontal=True, key="report_gender")
+        r_생년월일 = st.date_input(
+            "생년월일",
+            datetime(1990, 1, 1),
+            min_value=datetime(1900, 1, 1),
+            max_value=datetime(2030, 12, 31),
+            key="report_birth"
+        )
+    
+    with r_col2:
+        r_시_col, r_분_col = st.columns(2)
+        with r_시_col:
+            r_시 = st.number_input("시", min_value=0, max_value=23, value=12, key="report_hour")
+        with r_분_col:
+            r_분 = st.number_input("분", min_value=0, max_value=59, value=0, key="report_min")
+        
+        r_음양력 = st.radio("음력/양력", ["양력", "음력"], horizontal=True, key="report_calendar")
+        
+        if r_음양력 == "음력":
+            r_윤달 = st.checkbox("☑ 윤달", key="report_leap")
+        else:
+            r_윤달 = False
+    
+    # ============================================
+    # 프롬프트 선택
+    # ============================================
+    st.divider()
+    st.subheader("📝 생성할 장 선택")
+    
+    prompts_dir = os.path.join(os.path.dirname(__file__), "prompts")
+    available_prompts = load_prompts_from_dir(prompts_dir) if os.path.exists(prompts_dir) else []
+    
+    if available_prompts:
+        st.write(f"**사용 가능한 프롬프트: {len(available_prompts)}개**")
+        
+        selected_prompts = []
+        cols = st.columns(3)
+        for idx, prompt in enumerate(available_prompts):
+            with cols[idx % 3]:
+                if st.checkbox(f"{prompt['num']}. {prompt['name']}", value=True, key=f"ch_{prompt['num']}"):
+                    selected_prompts.append(prompt)
+        
+        if selected_prompts:
+            cost = estimate_cost(len(selected_prompts), model=selected_model)
+            st.caption(f"💰 예상 비용: ${cost['cost_usd']} (약 {cost['cost_krw']}원)")
+    else:
+        st.warning("prompts/ 폴더에 프롬프트 파일이 없습니다.")
+        selected_prompts = []
+    
+    st.divider()
+    
+    # ============================================
+    # 생성 버튼
+    # ============================================
+    btn_disabled = not api_key or not r_이름 or not selected_prompts
+    
+    if st.button("🚀 보고서 생성", type="primary", use_container_width=True, disabled=btn_disabled):
+        
+        progress = st.progress(0)
+        status = st.empty()
+        
+        try:
+            # 1. 날짜 변환
+            status.text("1/6 사주 계산 중...")
+            
+            input_year = r_생년월일.year
+            input_month = r_생년월일.month
+            input_day = r_생년월일.day
+            
+            if r_음양력 == "음력":
+                year, month, day = 음력_to_양력(input_year, input_month, input_day, r_윤달)
+                음력_str = 음력_문자열(input_year, input_month, input_day, r_윤달)
+                양력_str = f"{year}-{month:02d}-{day:02d} {r_시:02d}:{r_분:02d}"
+            else:
+                year, month, day = input_year, input_month, input_day
+                양력_str = f"{year}-{month:02d}-{day:02d} {r_시:02d}:{r_분:02d}"
+                음력_year, 음력_month, 음력_day, 음력_윤달 = 양력_to_음력(year, month, day)
+                음력_str = 음력_문자열(음력_year, 음력_month, 음력_day, 음력_윤달)
+            
+            사주 = calc_사주(year, month, day, r_시, r_분)
+            나이 = datetime.now().year - year + 1
+            gender = '남' if r_성별 == '남성' else '여'
+            
+            기본정보 = {
+                '이름': r_이름,
+                '성별': r_성별,
+                '나이': 나이,
+                '양력': 양력_str,
+                '음력': 음력_str,
+            }
+            
+            progress.progress(10)
+            
+            # 2. 운세 계산
+            status.text("2/6 운세 계산 중...")
+            대운_data = calc_대운(year, month, day, r_시, r_분, gender)
+            세운_data = calc_세운(year, month, day, r_시, r_분)
+            월운_data = calc_월운(year, month, day, r_시, r_분)
+            신살_data = calc_신살(사주, gender)
+            
+            progress.progress(20)
+            
+            # 3. GPT 텍스트 생성
+            status.text("3/6 GPT 텍스트 생성 중...")
+            gpt_text = generate_gpt_text(사주, 기본정보, gender, 대운_data, 세운_data, 월운_data, 신살_data)
+            
+            progress.progress(30)
+            
+            # 4. 이미지 생성
+            status.text("4/6 이미지 생성 중...")
+            
+            img_dir = f"/tmp/{r_이름}_images"
+            os.makedirs(img_dir, exist_ok=True)
+            
+            images = {}
+            
+            # 원국표
+            path = f"{img_dir}/01_원국표.png"
+            create_원국표(사주, 기본정보, path, 신살_data, ZODIAC_PATH)
+            images["01_원국표.png"] = path
+            
+            # 대운표
+            path = f"{img_dir}/02_대운표.png"
+            create_대운표(대운_data, 기본정보, path)
+            images["02_대운표.png"] = path
+            
+            # 세운표
+            path = f"{img_dir}/03_세운표.png"
+            create_세운표(세운_data, 기본정보, path)
+            images["03_세운표.png"] = path
+            
+            # 월운표
+            path = f"{img_dir}/04_월운표.png"
+            create_월운표(월운_data, 기본정보, path)
+            images["04_월운표.png"] = path
+            
+            # 용신표
+            path = f"{img_dir}/16_용신표.png"
+            create_용신표(사주, 기본정보, path)
+            images["16_용신표.png"] = path
+            
+            # 오행분석
+            path = f"{img_dir}/05_오행분석.png"
+            create_오행차트(사주, 기본정보, path)
+            images["05_오행분석.png"] = path
+            
+            progress.progress(40)
+            
+            # 5. Claude API 호출
+            status.text("5/6 Claude API로 해석 생성 중...")
+            
+            interpreter = SajuInterpreter(api_key=api_key, model=selected_model)
+            chapters = {}
+            
+            total_ch = len(selected_prompts)
+            for idx, prompt in enumerate(selected_prompts):
+                status.text(f"5/6 해석 생성 중: {prompt['name']} ({idx+1}/{total_ch})")
+                
+                chapters[prompt['name']] = interpreter.generate_chapter(
+                    chapter_name=prompt['name'],
+                    gpt_text=gpt_text,
+                    prompt_template=prompt['template']
+                )
+                
+                progress.progress(40 + int(40 * (idx + 1) / total_ch))
+            
+            # 6. Docx 생성 → PDF
+            status.text("6/6 PDF 조립 중...")
+            
+            # Docx 파일들 생성
+            docx_dir = f"/tmp/{r_이름}_docx"
+            os.makedirs(docx_dir, exist_ok=True)
+            
+            docx_paths = create_all_chapter_docx(
+                chapters=chapters,
+                output_dir=docx_dir,
+                customer_name=r_이름
+            )
+            
+            # PDF 생성
+            docx_contents = []
+            for path in sorted(docx_paths):
+                name = os.path.basename(path)
+                content = read_docx(path)
+                if content:
+                    docx_contents.append((name, content))
+            
+            # 이미지 데이터 로드
+            image_data = {}
+            for name, path in images.items():
+                with open(path, 'rb') as f:
+                    image_data[name] = f.read()
+            
+            pdf_path = f"/tmp/{r_이름}_사주보고서.pdf"
+            
+            create_pdf(
+                docx_contents=docx_contents,
+                images=image_data,
+                customer_name=r_이름,
+                output_path=pdf_path,
+                fonts_dir=os.path.join(os.path.dirname(__file__), "fonts")
+            )
+            
+            progress.progress(100)
+            status.text("✅ 완료!")
+            
+            # 다운로드 버튼
+            with open(pdf_path, 'rb') as f:
+                st.download_button(
+                    label="📥 PDF 다운로드",
+                    data=f,
+                    file_name=f"{r_이름}_사주보고서.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+            
+            # 미리보기
+            with st.expander("📖 생성된 해석 미리보기"):
+                for name, content in chapters.items():
+                    st.subheader(name)
+                    st.write(content[:800] + "..." if len(content) > 800 else content)
+                    st.divider()
+        
+        except Exception as e:
+            st.error(f"오류 발생: {str(e)}")
+            import traceback
+            st.code(traceback.format_exc())
+
+# ============================================
+# 탭5: 발송 관리
+# ============================================
+with tab5:
+    st.subheader("📧 이메일 & 카카오 발송 관리")
+    
+    if not MODULES_AVAILABLE:
+        st.error("⚠️ 발송 모듈 로드 실패")
+        st.stop()
+    
+    st.info("""
+    **발송 기능**
+    - Gmail SMTP로 이메일 발송
+    - Google Drive 업로드 후 링크 전송
+    - 카카오 알림톡/친구톡 (별도 설정 필요)
+    """)
+    
+    # ============================================
+    # Gmail 설정
+    # ============================================
+    with st.expander("📧 Gmail 설정", expanded=True):
+        gmail_col1, gmail_col2 = st.columns(2)
+        with gmail_col1:
+            sender_email = st.text_input("Gmail 주소", placeholder="your@gmail.com")
+        with gmail_col2:
+            sender_password = st.text_input("앱 비밀번호", type="password", 
+                                           help="Google 계정 → 보안 → 2단계 인증 → 앱 비밀번호")
+    
+    # ============================================
+    # Google Drive 설정
+    # ============================================
+    with st.expander("☁️ Google Drive 설정"):
+        drive_folder_id = st.text_input("드라이브 폴더 ID", 
+                                        help="드라이브 폴더 URL에서 folders/ 뒤의 ID")
+        drive_credentials = st.text_area("서비스 계정 JSON", height=100,
+                                         help="GCP 서비스 계정 JSON 키")
+    
+    st.divider()
+    
+    # ============================================
+    # 개별 발송
+    # ============================================
+    st.subheader("📤 개별 발송")
+    
+    send_col1, send_col2 = st.columns(2)
+    
+    with send_col1:
+        recipient_email = st.text_input("수신자 이메일", placeholder="customer@email.com")
+        recipient_name = st.text_input("수신자 이름", placeholder="홍길동")
+    
+    with send_col2:
+        uploaded_pdf = st.file_uploader("PDF 파일", type=["pdf"])
+        email_subject = st.text_input("이메일 제목", value="{name}님의 사주 분석 보고서")
+    
+    email_body = st.text_area(
+        "이메일 본문 (HTML)",
+        value=get_default_email_template(),
+        height=200
+    )
+    
+    if st.button("📧 이메일 발송", type="primary", disabled=not all([sender_email, sender_password, recipient_email, uploaded_pdf])):
+        with st.spinner("발송 중..."):
+            try:
+                # PDF 임시 저장
+                pdf_path = f"/tmp/{recipient_name}_report.pdf"
+                with open(pdf_path, 'wb') as f:
+                    f.write(uploaded_pdf.read())
+                
+                drive_link = None
+                
+                # 드라이브 업로드 (설정된 경우)
+                if drive_folder_id and drive_credentials:
+                    st.text("☁️ 드라이브 업로드 중...")
+                    result = upload_to_drive(
+                        file_path=pdf_path,
+                        folder_id=drive_folder_id,
+                        credentials_json=drive_credentials,
+                        file_name=f"{recipient_name}_사주보고서.pdf"
+                    )
+                    drive_link = result['web_link']
+                    st.success(f"✅ 드라이브 업로드 완료: {drive_link}")
+                
+                # 이메일 발송
+                st.text("📧 이메일 발송 중...")
+                result = send_email(
+                    to_email=recipient_email,
+                    subject=email_subject.format(name=recipient_name),
+                    body=email_body.format(name=recipient_name, drive_link=drive_link or ""),
+                    sender_email=sender_email,
+                    sender_password=sender_password,
+                    drive_link=drive_link
+                )
+                
+                if result['success']:
+                    st.success(result['message'])
+                else:
+                    st.error(result['message'])
+            
+            except Exception as e:
+                st.error(f"발송 실패: {str(e)}")
+    
+    st.divider()
+    
+    # ============================================
+    # 대량 발송 (엑셀)
+    # ============================================
+    st.subheader("📊 대량 발송 (엑셀)")
+    
+    st.write("""
+    **엑셀 형식**: 이름, 이메일, PDF파일경로 (또는 드라이브링크)
+    """)
+    
+    bulk_excel = st.file_uploader("발송 목록 엑셀", type=["xlsx", "xls"], key="bulk_send")
+    
+    if bulk_excel:
+        df = pd.read_excel(bulk_excel)
+        st.dataframe(df, use_container_width=True)
+        
+        if st.button("📧 일괄 발송", type="primary"):
+            st.warning("⚠️ 일괄 발송 기능은 추후 구현 예정입니다.")
 
