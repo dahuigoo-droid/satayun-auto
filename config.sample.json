@@ -1,0 +1,16 @@
+{
+    "anthropic_api_key": "sk-ant-...",
+    "model": "claude-sonnet-4-20250514",
+    
+    "gmail_email": "your@gmail.com",
+    "gmail_password": "앱비밀번호16자리",
+    
+    "drive_folder_id": "구글드라이브폴더ID",
+    "drive_credentials": "서비스계정JSON내용또는파일경로",
+    
+    "kakao_api_key": "",
+    "kakao_sender_key": "",
+    
+    "output_dir": "./output",
+    "parallel_chapters": 5
+}
