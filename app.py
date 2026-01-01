@@ -1109,7 +1109,7 @@ with tab4:
     
     # 마스터 프롬프트 로드
     prompts_dir = os.path.join(os.path.dirname(__file__), "prompts")
-    master_prompt_path = os.path.join(prompts_dir, "00_마스터프롬프트.txt")
+    master_prompt_path = os.path.join(prompts_dir, "00_master_prompt.txt")
     
     master_prompt = None
     if os.path.exists(master_prompt_path):
