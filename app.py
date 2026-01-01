@@ -1030,23 +1030,22 @@ with tab3:
                 st.image(경로, caption=파일명)
 
 # ============================================
-# 탭4: 보고서 생성 (Claude API + PDF)
+# 탭4: 보고서 생성 (마스터 프롬프트 방식)
 # ============================================
 with tab4:
-    st.subheader("📄 사주 보고서 자동 생성")
+    st.subheader("📄 사주 보고서 자동 생성 (150페이지)")
     
     if not MODULES_AVAILABLE:
         st.error(f"⚠️ 추가 모듈 로드 실패: {IMPORT_ERROR}")
-        st.code("pip install anthropic python-docx reportlab google-api-python-client", language="bash")
+        st.code("pip install anthropic python-docx reportlab", language="bash")
         st.stop()
     
     st.info("""
     **자동 보고서 생성 흐름**
-    1. 고객 정보 입력 → 사주 계산
-    2. 이미지 17종 자동 생성
-    3. Claude API로 장별 해석 생성
-    4. PDF 자동 조립
-    5. 다운로드 (또는 드라이브 업로드)
+    1. 고객 정보 입력 → 사주 계산 → 이미지 17종 생성
+    2. 장 범위 선택 (1~3장, 4~6장, ...)
+    3. Claude API로 장별 해석 생성 (마스터 프롬프트)
+    4. Docx 파일 다운로드
     """)
     
     # ============================================
@@ -1103,37 +1102,77 @@ with tab4:
             r_윤달 = False
     
     # ============================================
-    # 프롬프트 선택
+    # 장 범위 선택 (마스터 프롬프트 방식)
     # ============================================
     st.divider()
     st.subheader("📝 생성할 장 선택")
     
+    # 마스터 프롬프트 로드
     prompts_dir = os.path.join(os.path.dirname(__file__), "prompts")
-    available_prompts = load_prompts_from_dir(prompts_dir) if os.path.exists(prompts_dir) else []
+    master_prompt_path = os.path.join(prompts_dir, "00_마스터프롬프트.txt")
     
-    if available_prompts:
-        st.write(f"**사용 가능한 프롬프트: {len(available_prompts)}개**")
-        
-        selected_prompts = []
-        cols = st.columns(3)
-        for idx, prompt in enumerate(available_prompts):
-            with cols[idx % 3]:
-                if st.checkbox(f"{prompt['num']}. {prompt['name']}", value=True, key=f"ch_{prompt['num']}"):
-                    selected_prompts.append(prompt)
-        
-        if selected_prompts:
-            cost = estimate_cost(len(selected_prompts), model=selected_model)
-            st.caption(f"💰 예상 비용: ${cost['cost_usd']} (약 {cost['cost_krw']}원)")
+    master_prompt = None
+    if os.path.exists(master_prompt_path):
+        with open(master_prompt_path, 'r', encoding='utf-8') as f:
+            master_prompt = f.read()
+        st.success("✅ 마스터 프롬프트 로드됨")
     else:
-        st.warning("prompts/ 폴더에 프롬프트 파일이 없습니다.")
-        selected_prompts = []
+        st.error("❌ prompts/00_마스터프롬프트.txt 파일이 없습니다")
+    
+    # 장 범위 선택
+    st.write("**생성할 장 범위 선택** (권장: 3장씩)")
+    
+    장_옵션 = {
+        "1~3장": list(range(1, 4)),
+        "4~6장": list(range(4, 7)),
+        "7~9장": list(range(7, 10)),
+        "10~12장": list(range(10, 13)),
+        "13~15장": list(range(13, 16)),
+        "전체 (1~15장)": list(range(1, 16)),
+    }
+    
+    selected_range = st.selectbox(
+        "장 범위",
+        options=list(장_옵션.keys()),
+        index=0
+    )
+    
+    selected_chapters = 장_옵션[selected_range]
+    
+    # 비용 예상
+    cost_per_chapter = 0.05 if "sonnet" in selected_model else 0.01  # USD
+    estimated_cost = len(selected_chapters) * cost_per_chapter
+    st.caption(f"💰 예상 비용: ${estimated_cost:.2f} (약 {int(estimated_cost * 1400)}원) - {len(selected_chapters)}장")
+    
+    # 장 목차 표시
+    장_목차 = {
+        1: "일년 운세 리포트의 해석 관점",
+        2: "사주 구조 핵심 요약",
+        3: "일년 전체 운의 큰 흐름",
+        4: "상반기 월별 운의 작동 구조",
+        5: "하반기 월별 운의 변화 포인트",
+        6: "감정·심리 흐름",
+        7: "인간관계 전반의 운 흐름",
+        8: "연애·부부·이성 운",
+        9: "직업·일·커리어 운",
+        10: "재물·수입·지출 운",
+        11: "건강·에너지 흐름",
+        12: "선택이 중요한 시점들",
+        13: "조심해야 할 작용",
+        14: "해 운을 활용하는 전략",
+        15: "이 한 해가 남기는 의미",
+    }
+    
+    with st.expander("📋 선택된 장 목차"):
+        for ch in selected_chapters:
+            st.write(f"**제{ch}장.** {장_목차.get(ch, '')}")
     
     st.divider()
     
     # ============================================
     # 생성 버튼
     # ============================================
-    btn_disabled = not api_key or not r_이름 or not selected_prompts
+    btn_disabled = not api_key or not r_이름 or not master_prompt
     
     if st.button("🚀 보고서 생성", type="primary", use_container_width=True, disabled=btn_disabled):
         
@@ -1141,8 +1180,8 @@ with tab4:
         status = st.empty()
         
         try:
-            # 1. 날짜 변환
-            status.text("1/6 사주 계산 중...")
+            # 1. 날짜 변환 및 사주 계산
+            status.text("1/5 사주 계산 중...")
             
             input_year = r_생년월일.year
             input_month = r_생년월일.month
@@ -1173,133 +1212,163 @@ with tab4:
             progress.progress(10)
             
             # 2. 운세 계산
-            status.text("2/6 운세 계산 중...")
+            status.text("2/5 운세 계산 중...")
             대운_data = calc_대운(year, month, day, r_시, r_분, gender)
             세운_data = calc_세운(year, month, day, r_시, r_분)
             월운_data = calc_월운(year, month, day, r_시, r_분)
             신살_data = calc_신살(사주, gender)
             
-            progress.progress(20)
+            progress.progress(15)
             
             # 3. GPT 텍스트 생성
-            status.text("3/6 GPT 텍스트 생성 중...")
+            status.text("3/5 사주 데이터 생성 중...")
             gpt_text = generate_gpt_text(사주, 기본정보, gender, 대운_data, 세운_data, 월운_data, 신살_data)
             
-            progress.progress(30)
+            progress.progress(20)
             
-            # 4. 이미지 생성
-            status.text("4/6 이미지 생성 중...")
+            # 4. 이미지 생성 (17종)
+            status.text("4/5 이미지 17종 생성 중...")
             
             img_dir = f"/tmp/{r_이름}_images"
             os.makedirs(img_dir, exist_ok=True)
             
-            images = {}
-            
             # 원국표
-            path = f"{img_dir}/01_원국표.png"
-            create_원국표(사주, 기본정보, path, 신살_data, ZODIAC_PATH)
-            images["01_원국표.png"] = path
-            
+            create_원국표(사주, 기본정보, f"{img_dir}/01_원국표.png", 신살_data, ZODIAC_PATH)
             # 대운표
-            path = f"{img_dir}/02_대운표.png"
-            create_대운표(대운_data, 기본정보, path)
-            images["02_대운표.png"] = path
-            
+            create_대운표(대운_data, 기본정보, f"{img_dir}/02_대운표.png")
             # 세운표
-            path = f"{img_dir}/03_세운표.png"
-            create_세운표(세운_data, 기본정보, path)
-            images["03_세운표.png"] = path
-            
+            create_세운표(세운_data, 기본정보, f"{img_dir}/03_세운표.png")
             # 월운표
-            path = f"{img_dir}/04_월운표.png"
-            create_월운표(월운_data, 기본정보, path)
-            images["04_월운표.png"] = path
-            
-            # 용신표
-            path = f"{img_dir}/16_용신표.png"
-            create_용신표(사주, 기본정보, path)
-            images["16_용신표.png"] = path
-            
+            create_월운표(월운_data, 기본정보, f"{img_dir}/04_월운표.png")
             # 오행분석
-            path = f"{img_dir}/05_오행분석.png"
-            create_오행차트(사주, 기본정보, path)
-            images["05_오행분석.png"] = path
+            create_오행차트(사주, 기본정보, f"{img_dir}/05_오행분석.png")
+            # 십성표
+            create_십성표(사주, 기본정보, f"{img_dir}/06_십성표.png")
+            # 신살표
+            create_신살표(신살_data, 기본정보, f"{img_dir}/07_신살표.png")
+            # 12운성표
+            create_12운성표(사주, 기본정보, f"{img_dir}/08_12운성표.png")
+            # 지장간표
+            create_지장간표(사주, 기본정보, f"{img_dir}/09_지장간표.png")
+            # 합충형파해표
+            create_합충형파해표(사주, 기본정보, f"{img_dir}/10_합충형파해표.png")
+            # 궁성표
+            create_궁성표(사주, 기본정보, f"{img_dir}/11_궁성표.png")
+            # 육친표
+            create_육친표(사주, 기본정보, gender, f"{img_dir}/12_육친표.png")
+            # 납음오행표
+            create_납음오행표(사주, 기본정보, f"{img_dir}/13_납음오행표.png")
+            # 격국표
+            create_격국표(사주, 기본정보, f"{img_dir}/14_격국표.png")
+            # 공망표
+            create_공망표(사주, 기본정보, f"{img_dir}/15_공망표.png")
+            # 용신표
+            create_용신표(사주, 기본정보, f"{img_dir}/16_용신표.png")
             
-            progress.progress(40)
+            progress.progress(30)
             
-            # 5. Claude API 호출
-            status.text("5/6 Claude API로 해석 생성 중...")
+            # 5. Claude API 호출 (장별)
+            status.text("5/5 Claude API로 장별 해석 생성 중...")
             
-            interpreter = SajuInterpreter(api_key=api_key, model=selected_model)
-            chapters = {}
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key)
             
-            total_ch = len(selected_prompts)
-            for idx, prompt in enumerate(selected_prompts):
-                status.text(f"5/6 해석 생성 중: {prompt['name']} ({idx+1}/{total_ch})")
-                
-                chapters[prompt['name']] = interpreter.generate_chapter(
-                    chapter_name=prompt['name'],
-                    gpt_text=gpt_text,
-                    prompt_template=prompt['template']
-                )
-                
-                progress.progress(40 + int(40 * (idx + 1) / total_ch))
-            
-            # 6. Docx 생성 → PDF
-            status.text("6/6 PDF 조립 중...")
-            
-            # Docx 파일들 생성
+            # Docx 저장 폴더
             docx_dir = f"/tmp/{r_이름}_docx"
             os.makedirs(docx_dir, exist_ok=True)
             
-            docx_paths = create_all_chapter_docx(
-                chapters=chapters,
-                output_dir=docx_dir,
-                customer_name=r_이름
-            )
+            generated_files = []
+            total_ch = len(selected_chapters)
             
-            # PDF 생성
-            docx_contents = []
-            for path in sorted(docx_paths):
-                name = os.path.basename(path)
-                content = read_docx(path)
-                if content:
-                    docx_contents.append((name, content))
-            
-            # 이미지 데이터 로드
-            image_data = {}
-            for name, path in images.items():
-                with open(path, 'rb') as f:
-                    image_data[name] = f.read()
-            
-            pdf_path = f"/tmp/{r_이름}_사주보고서.pdf"
-            
-            create_pdf(
-                docx_contents=docx_contents,
-                images=image_data,
-                customer_name=r_이름,
-                output_path=pdf_path,
-                fonts_dir=os.path.join(os.path.dirname(__file__), "fonts")
-            )
+            for idx, ch_num in enumerate(selected_chapters):
+                status.text(f"5/5 제{ch_num}장 생성 중... ({idx+1}/{total_ch})")
+                
+                # Claude API 호출
+                user_message = f"""[사주 데이터]
+{gpt_text}
+
+위 데이터를 바탕으로 "제{ch_num}장. {장_목차.get(ch_num, '')}"을 작성해주세요.
+목차의 소주제를 모두 포함하여 작성하세요."""
+                
+                response = client.messages.create(
+                    model=selected_model,
+                    max_tokens=8000,
+                    system=master_prompt,
+                    messages=[
+                        {"role": "user", "content": user_message}
+                    ]
+                )
+                
+                chapter_content = response.content[0].text
+                
+                # Docx 저장
+                from docx import Document
+                from docx.shared import Pt
+                from docx.oxml.ns import qn
+                
+                doc = Document()
+                
+                # 스타일 설정
+                style = doc.styles['Normal']
+                style.font.name = '맑은 고딕'
+                style.font.size = Pt(17)
+                style._element.rPr.rFonts.set(qn('w:eastAsia'), '맑은 고딕')
+                
+                # 내용 추가
+                for para_text in chapter_content.split('\n'):
+                    if para_text.strip():
+                        doc.add_paragraph(para_text.strip())
+                
+                # 파일 저장
+                docx_filename = f"제{ch_num}장_{장_목차.get(ch_num, '').replace('·', '_')}.docx"
+                docx_path = os.path.join(docx_dir, docx_filename)
+                doc.save(docx_path)
+                generated_files.append(docx_path)
+                
+                progress.progress(30 + int(65 * (idx + 1) / total_ch))
             
             progress.progress(100)
             status.text("✅ 완료!")
             
-            # 다운로드 버튼
-            with open(pdf_path, 'rb') as f:
-                st.download_button(
-                    label="📥 PDF 다운로드",
-                    data=f,
-                    file_name=f"{r_이름}_사주보고서.pdf",
-                    mime="application/pdf",
-                    use_container_width=True
-                )
+            # ZIP 생성 및 다운로드
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+                # Docx 파일들
+                for docx_path in generated_files:
+                    zf.write(docx_path, os.path.basename(docx_path))
+                
+                # 이미지 파일들
+                for img_file in os.listdir(img_dir):
+                    img_path = os.path.join(img_dir, img_file)
+                    zf.write(img_path, f"images/{img_file}")
+                
+                # GPT 텍스트
+                gpt_text_path = f"/tmp/{r_이름}_사주데이터.txt"
+                with open(gpt_text_path, 'w', encoding='utf-8') as f:
+                    f.write(gpt_text)
+                zf.write(gpt_text_path, f"{r_이름}_사주데이터.txt")
             
-            # 미리보기
-            with st.expander("📖 생성된 해석 미리보기"):
-                for name, content in chapters.items():
-                    st.subheader(name)
-                    st.write(content[:800] + "..." if len(content) > 800 else content)
+            zip_buffer.seek(0)
+            
+            st.download_button(
+                label=f"📥 {r_이름}_{selected_range} 다운로드 (ZIP)",
+                data=zip_buffer,
+                file_name=f"{r_이름}_{selected_range.replace('~', '-')}_보고서.zip",
+                mime="application/zip",
+                use_container_width=True
+            )
+            
+            # 생성 결과 표시
+            st.success(f"✅ {len(generated_files)}개 장 생성 완료!")
+            
+            with st.expander("📖 생성된 내용 미리보기"):
+                for docx_path in generated_files:
+                    filename = os.path.basename(docx_path)
+                    st.subheader(filename.replace('.docx', ''))
+                    
+                    doc = Document(docx_path)
+                    preview_text = '\n'.join([p.text for p in doc.paragraphs[:10]])
+                    st.write(preview_text[:1000] + "..." if len(preview_text) > 1000 else preview_text)
                     st.divider()
         
         except Exception as e:
